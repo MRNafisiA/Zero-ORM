@@ -1,0 +1,1164 @@
+import * as U from './utils';
+import { ClientBase } from 'pg';
+import { Dictionary } from './keywords';
+import { err, ok, Result } from 'never-catch';
+import { Context, createContext } from './context';
+import { Schema, NullableType, TableBySchema, Table } from './Table';
+import {
+    resolveColumn,
+    resolveResult,
+    resolveReturning,
+    resolveExpression
+} from './resolve';
+
+const createEntity = <S extends Schema>(table: TableBySchema<S>) => {
+    const context = createContext(table);
+    return {
+        table,
+        context,
+        select: <
+            const R extends (keyof S & string) | CustomColumn<unknown, string>
+        >(
+            returning: R[] | ((context: Context<S>) => R[]),
+            where: (null | boolean) | ((context: Context<S>) => null | boolean),
+            options = {} as SelectOptions<S>
+        ): Query<S, R> =>
+            createQuery(params =>
+                createSelectQuery(
+                    context,
+                    table,
+                    returning,
+                    where,
+                    options,
+                    params
+                )
+            ),
+        insert: <
+            const R extends (keyof S & string) | CustomColumn<unknown, string>
+        >(
+            rows:
+                | InsertingRow<S>[]
+                | ((context: Context<S>) => InsertingRow<S>[]),
+            returning: R[] | ((context: Context<S>) => R[])
+        ): Query<S, R> =>
+            createQuery(params =>
+                createInsertQuery(context, table, rows, returning, params)
+            ),
+        update: <
+            const R extends (keyof S & string) | CustomColumn<unknown, string>
+        >(
+            sets: UpdateSets<S> | ((context: Context<S>) => UpdateSets<S>),
+            where: (null | boolean) | ((context: Context<S>) => null | boolean),
+            returning: R[] | ((context: Context<S>) => R[])
+        ): Query<S, R> =>
+            createQuery(params =>
+                createUpdateQuery(
+                    context,
+                    table,
+                    sets,
+                    where,
+                    returning,
+                    params
+                )
+            ),
+        delete: <
+            const R extends (keyof S & string) | CustomColumn<unknown, string>
+        >(
+            where: (null | boolean) | ((context: Context<S>) => null | boolean),
+            returning: R[] | ((context: Context<S>) => R[])
+        ): Query<S, R> =>
+            createQuery(params =>
+                createDeleteQuery(context, table, returning, where, params)
+            ),
+        join: <MA extends string, JS extends Schema, JA extends string>(
+            mainAlias: MA,
+            joinType: JoinType,
+            joinTable: TableBySchema<JS>,
+            joinAlias: JA,
+            on:
+                | boolean
+                | ((
+                      contexts: SchemaMapContexts<
+                          Record<MA, S> & Record<JA, JS>
+                      >
+                  ) => boolean)
+        ): JoinEntity<
+            Record<MA, S> & Record<JA, JS>,
+            PrefixAliasOnSchema<S, MA> & PrefixAliasOnSchema<JS, JA>
+        > =>
+            createJoinSelectEntity<
+                Record<MA, S> & Record<JA, JS>,
+                PrefixAliasOnSchema<S, MA> & PrefixAliasOnSchema<JS, JA>
+            >(
+                { table, alias: mainAlias },
+                [
+                    {
+                        table: joinTable,
+                        joinType,
+                        alias: joinAlias,
+                        on
+                    }
+                ],
+                {
+                    [`${mainAlias}Context`]: createContext(table, mainAlias),
+                    [`${joinAlias}Context`]: createContext(joinTable, joinAlias)
+                } as SchemaMapContexts<Record<MA, S> & Record<JA, JS>>
+            )
+    };
+};
+
+// select
+type By<S extends Schema> = (keyof S & string) | { expression: unknown };
+
+type Order<S extends Schema> = {
+    by: By<S>;
+    direction: OrderDirection;
+    nullPosition?: 'first' | 'last';
+};
+
+type CustomQueryBuilder = (
+    parts: Record<
+        `${'distinct' | 'returning' | 'from' | 'where' | 'groupBy' | 'orders' | 'pagination'}Part`,
+        string
+    >,
+    params: string[]
+) => QueryData;
+
+type SelectOptions<S extends Schema> = {
+    distinct?: (true | By<S>[]) | ((context: Context<S>) => true | By<S>[]);
+    groupBy?: By<S>[] | ((context: Context<S>) => By<S>[]);
+    orders?: Order<S>[] | ((context: Context<S>) => Order<S>[]);
+    start?: bigint;
+    step?: number;
+    customQueryBuilder?: CustomQueryBuilder;
+};
+
+const defaultCustomQueryBuilder: CustomQueryBuilder = (parts, params) => {
+    const tokens = ['SELECT'];
+    if (parts.distinctPart !== '') {
+        tokens.push(parts.distinctPart);
+    }
+    tokens.push(
+        parts.returningPart,
+        'FROM',
+        parts.fromPart,
+        'WHERE',
+        parts.wherePart
+    );
+    if (parts.groupByPart !== '') {
+        tokens.push('GROUP BY', parts.groupByPart);
+    }
+    if (parts.ordersPart !== '') {
+        tokens.push('ORDER BY', parts.ordersPart);
+    }
+    if (parts.paginationPart !== '') {
+        tokens.push(parts.paginationPart);
+    }
+
+    return {
+        sql: tokens.join(' '),
+        params
+    };
+};
+
+const createSelectQuery = <S extends Schema>(
+    context: Context<S>,
+    table: TableBySchema<S>,
+    returning: ReturningRow[] | ((context: Context<S>) => ReturningRow[]),
+    where: (null | boolean) | ((context: Context<S>) => null | boolean),
+    options: SelectOptions<S>,
+    params: string[]
+): Result<QueryData, string> => {
+    const errorPrefix = `select("${table.schemaName}"."${table.tableName}")`;
+    const {
+        distinct = false,
+        groupBy = [],
+        orders = [],
+        start,
+        step,
+        customQueryBuilder = defaultCustomQueryBuilder
+    } = options;
+
+    // distinct
+    let distinctPart = '';
+    const _distinct =
+        typeof distinct === 'function' ? distinct(context) : distinct;
+    if (_distinct === true) {
+        distinctPart = 'DISTINCT';
+    } else if (Array.isArray(_distinct)) {
+        const distinctTextArray = [];
+        for (const aDistinct of _distinct) {
+            if (typeof aDistinct === 'object') {
+                const resolvedExpression = resolveExpression(
+                    aDistinct.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedExpression.ok) {
+                    return err(
+                        `${errorPrefix} -> distinct -> ${_distinct.indexOf(aDistinct)} -> ${resolvedExpression.error}`
+                    );
+                }
+                params.push(...resolvedExpression.value.params);
+                distinctTextArray.push(resolvedExpression.value.text);
+            } else {
+                distinctTextArray.push(resolveColumn(table, aDistinct, false));
+            }
+        }
+        distinctPart = `DISTINCT ON(${distinctTextArray.join(', ')})`;
+    }
+
+    // select
+    const _returning =
+        typeof returning === 'function' ? returning(context) : returning;
+    const resolvedReturning = resolveReturning(
+        column => [(table as Table).columns[column].title, undefined],
+        _returning,
+        params.length + 1
+    );
+    if (!resolvedReturning.ok) {
+        return err(`${errorPrefix} -> ${resolvedReturning.error}`);
+    }
+    params.push(...resolvedReturning.value.params);
+    const returningPart = resolvedReturning.value.text;
+
+    // from
+    const fromPart = `"${table.schemaName}"."${table.tableName}"`;
+
+    // where
+    const resolvedWhereResult = resolveExpression(
+        typeof where === 'function' ? where(context) : where,
+        params.length + 1,
+        false
+    );
+    if (!resolvedWhereResult.ok) {
+        return err(`${errorPrefix} -> where -> ${resolvedWhereResult.error}`);
+    }
+    if (resolvedWhereResult.value.text === '') {
+        return err(`${errorPrefix} -> where -> neutral`);
+    }
+    params.push(...resolvedWhereResult.value.params);
+    const wherePart = resolvedWhereResult.value.text;
+
+    // groupBy
+    let groupByPart = '';
+    const _groupBy = typeof groupBy === 'function' ? groupBy(context) : groupBy;
+    if (_groupBy.length !== 0) {
+        const groupByTextArray = [];
+        for (const aGroupBy of _groupBy) {
+            if (typeof aGroupBy === 'object') {
+                const resolvedExpression = resolveExpression(
+                    aGroupBy.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedExpression.ok) {
+                    return err(
+                        `${errorPrefix} -> groupBy -> ${_groupBy.indexOf(aGroupBy)} -> ${resolvedExpression.error}`
+                    );
+                }
+                params.push(...resolvedExpression.value.params);
+                groupByTextArray.push(resolvedExpression.value.text);
+            } else {
+                groupByTextArray.push(resolveColumn(table, aGroupBy, false));
+            }
+        }
+        groupByPart = groupByTextArray.join(', ');
+    }
+
+    // orders
+    let ordersPart = '';
+    const _orders = typeof orders === 'function' ? orders(context) : orders;
+    if (_orders.length !== 0) {
+        const ordersTextArray = [];
+        for (const order of _orders) {
+            const { by, direction, nullPosition } = order;
+            const nullPositionText =
+                nullPosition !== undefined
+                    ? ' ' + Dictionary.OrderNullPosition[nullPosition]
+                    : '';
+            if (typeof by === 'object') {
+                const resolvedExpression = resolveExpression(
+                    by.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedExpression.ok) {
+                    return err(
+                        `${errorPrefix} -> orderBy -> ${_orders.indexOf(order)} -> by -> ${resolvedExpression.error}`
+                    );
+                }
+                params.push(...resolvedExpression.value.params);
+                ordersTextArray.push(
+                    `${resolvedExpression.value.text} ${Dictionary.OrderDirection[direction]}${nullPositionText}`
+                );
+            } else {
+                ordersTextArray.push(
+                    `${resolveColumn(table, by, false)} ${Dictionary.OrderDirection[direction]}${nullPositionText}`
+                );
+            }
+        }
+        ordersPart = ordersTextArray.join(', ');
+    }
+
+    // pagination
+    let paginationPart = '';
+    const paginationTextArray = [];
+    if (start !== undefined) {
+        if (start < 0) {
+            return err(`${errorPrefix} -> start -> invalid`);
+        }
+        paginationTextArray.push(`OFFSET ${start}`);
+    }
+    if (step !== undefined) {
+        if (step <= 0) {
+            return err(`${errorPrefix} -> step -> invalid`);
+        }
+        paginationTextArray.push(`LIMIT ${step}`);
+    }
+    if (paginationTextArray.length !== 0) {
+        paginationPart = paginationTextArray.join(' ');
+    }
+
+    return ok(
+        customQueryBuilder(
+            {
+                distinctPart,
+                returningPart,
+                fromPart,
+                wherePart,
+                groupByPart,
+                ordersPart,
+                paginationPart
+            },
+            params
+        )
+    );
+};
+
+// insert
+type InsertOptions<S extends Schema, N extends NullableAndDefaultColumns<S>> = {
+    nullableDefaultColumns?: N[];
+};
+
+type InsertingRow<S extends Schema> = {
+    [key in Exclude<
+        keyof S & string,
+        NullableAndDefaultColumns<S>
+    >]: S[key]['narrowType'];
+} & {
+    [key in NullableAndDefaultColumns<S>]?: NullableType<
+        S[key]['narrowType'],
+        S[key]['nullable']
+    >;
+};
+
+const createInsertQuery = <S extends Schema>(
+    context: Context<S>,
+    table: TableBySchema<S>,
+    rows:
+        | Record<string, unknown>[]
+        | ((context: Context<S>) => Record<string, unknown>[]),
+    returning: ReturningRow[] | ((context: Context<S>) => ReturningRow[]),
+    params: string[]
+): Result<QueryData, string> => {
+    const errorPrefix = `insert("${table.schemaName}"."${table.tableName}")`;
+    const tokens = [`INSERT INTO "${table.schemaName}"."${table.tableName}"`];
+
+    // rows
+    const rowsTextArray: string[] = [];
+    const _rows = typeof rows === 'function' ? rows(context) : rows;
+    if (_rows.length === 0) {
+        return err(`${errorPrefix} -> rows -> empty`);
+    }
+
+    const temp: Record<string, true> = Object.fromEntries(
+        Object.keys(table.columns)
+            .filter(
+                columnKey =>
+                    !table.columns[columnKey].nullable ||
+                    table.columns[columnKey].default
+            )
+            .map(columnKey => [columnKey, true])
+    );
+    _rows.forEach(_row => Object.keys(_row).forEach(key => (temp[key] = true)));
+    const insertingColumns = Object.keys(temp);
+    const columnsTextArray = insertingColumns.map(columnKey =>
+        resolveColumn(table, columnKey, false)
+    );
+    tokens.push(`(${columnsTextArray.join(', ')})`, 'VALUES');
+
+    for (const _row of _rows) {
+        const rowTokens = [];
+        for (const insertingColumn of insertingColumns) {
+            if (_row[insertingColumn] === undefined) {
+                const column = table.columns[insertingColumn] as unknown as {
+                    nullable: boolean;
+                    defaultValue:
+                        | undefined
+                        | ['auto-increment']
+                        | ['created-at']
+                        | ['updated-at']
+                        | ['sql', string]
+                        | ['js', unknown];
+                };
+                if (column.defaultValue !== undefined) {
+                    switch (column.defaultValue[0]) {
+                        case 'auto-increment':
+                            rowTokens.push('DEFAULT');
+                            continue;
+                        case 'created-at':
+                        case 'updated-at':
+                            rowTokens.push(U.stringify(new Date(), true));
+                            continue;
+                        case 'sql':
+                            rowTokens.push(column.defaultValue[1]);
+                            continue;
+                        case 'js':
+                            rowTokens.push(
+                                U.stringify(column.defaultValue[1], true)
+                            );
+                            continue;
+                    }
+                }
+                if (column.nullable) {
+                    rowTokens.push(U.stringify(null, true));
+                    continue;
+                }
+                return err(
+                    `${errorPrefix} -> rows -> [${_rows.indexOf(_row)}] -> [${insertingColumn}] -> no-value`
+                );
+            } else {
+                const resolvedExpressionResult = resolveExpression(
+                    _row[insertingColumn],
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedExpressionResult.ok) {
+                    return err(
+                        `${errorPrefix} -> rows -> [${_rows.indexOf(_row)}] -> [${insertingColumn}] -> ${
+                            resolvedExpressionResult.error
+                        }`
+                    );
+                }
+                if (resolvedExpressionResult.value.text === '') {
+                    return err(
+                        `${errorPrefix} -> rows -> [${_rows.indexOf(_row)}] -> [${insertingColumn}] -> neutral`
+                    );
+                }
+                params.push(...resolvedExpressionResult.value.params);
+                rowTokens.push(resolvedExpressionResult.value.text);
+            }
+        }
+        rowsTextArray.push(`(${rowTokens.join(', ')})`);
+    }
+    tokens.push(rowsTextArray.join(', '));
+
+    // returning
+    const _returning =
+        typeof returning === 'function' ? returning(context) : returning;
+    if (_returning.length !== 0) {
+        const resolvedReturning = resolveReturning(
+            column => [(table as Table).columns[column].title, undefined],
+            _returning,
+            params.length + 1
+        );
+        if (!resolvedReturning.ok) {
+            return err(`${errorPrefix} -> ${resolvedReturning.error}`);
+        }
+        params.push(...resolvedReturning.value.params);
+        tokens.push('RETURNING', resolvedReturning.value.text);
+    }
+
+    return ok({ sql: tokens.join(' '), params });
+};
+
+// update
+type UpdateSets<S extends Schema> = {
+    [key in keyof S]?: NullableType<S[key]['narrowType'], S[key]['nullable']>;
+};
+
+const createUpdateQuery = <S extends Schema>(
+    context: Context<S>,
+    table: TableBySchema<S>,
+    sets: UpdateSets<S> | ((context: Context<S>) => UpdateSets<S>),
+    where: (null | boolean) | ((context: Context<S>) => null | boolean),
+    returning: ReturningRow[] | ((context: Context<S>) => ReturningRow[]),
+    params: string[]
+): Result<QueryData, string> => {
+    const errorPrefix = `update("${table.schemaName}"."${table.tableName}")`;
+    const tokens = [`UPDATE "${table.schemaName}"."${table.tableName}" SET`];
+
+    // set
+    const _set = typeof sets === 'function' ? sets(context) : sets;
+    const setsTextArray = [];
+    let key: keyof typeof _set & string;
+    for (key in _set) {
+        if (_set[key] === undefined) {
+            continue;
+        }
+        const setExpressionResult = resolveExpression(
+            _set[key],
+            params.length + 1,
+            false
+        );
+        if (!setExpressionResult.ok) {
+            return err(
+                `${errorPrefix} -> sets -> [${key}] -> ${setExpressionResult.error}`
+            );
+        }
+        if (setExpressionResult.value.text === '') {
+            return err(`${errorPrefix} -> sets -> [${key}] -> neutral`);
+        }
+        params.push(...setExpressionResult.value.params);
+        setsTextArray.push(
+            `${resolveColumn(table, key, false)} = ${setExpressionResult.value.text}`
+        );
+    }
+    for (const column in table.columns) {
+        switch (
+            (
+                table.columns[column] as unknown as {
+                    defaultValue: undefined | ['updated-at'];
+                }
+            ).defaultValue?.[0]
+        ) {
+            case 'updated-at':
+                setsTextArray.push(
+                    `${resolveColumn(table, column, false)} = ${U.stringify(new Date(), true)}`
+                );
+                break;
+        }
+    }
+    if (setsTextArray.length === 0) {
+        return err(`${errorPrefix} -> sets -> empty`);
+    }
+    tokens.push(setsTextArray.join(', '));
+
+    // where
+    const resolvedWhereResult = resolveExpression(
+        typeof where === 'function' ? where(context) : where,
+        params.length + 1,
+        false
+    );
+    if (!resolvedWhereResult.ok) {
+        return err(`${errorPrefix} -> where -> ${resolvedWhereResult.error}`);
+    }
+    if (resolvedWhereResult.value.text === '') {
+        return err(`${errorPrefix} -> where -> neutral`);
+    }
+    params.push(...resolvedWhereResult.value.params);
+    tokens.push('WHERE', resolvedWhereResult.value.text);
+
+    // returning
+    const _returning =
+        typeof returning === 'function' ? returning(context) : returning;
+    if (_returning.length !== 0) {
+        const resolvedReturning = resolveReturning(
+            column => [(table as Table).columns[column].title, undefined],
+            _returning,
+            params.length + 1
+        );
+        if (!resolvedReturning.ok) {
+            return err(`${errorPrefix} -> ${resolvedReturning.error}`);
+        }
+        params.push(...resolvedReturning.value.params);
+        tokens.push('RETURNING', resolvedReturning.value.text);
+    }
+
+    return ok({ sql: tokens.join(' '), params });
+};
+
+// delete
+const createDeleteQuery = <S extends Schema>(
+    context: Context<S>,
+    table: TableBySchema<S>,
+    returning: ReturningRow[] | ((context: Context<S>) => ReturningRow[]),
+    where: (null | boolean) | ((context: Context<S>) => null | boolean),
+    params: string[]
+): Result<QueryData, string> => {
+    const tokens = [`DELETE FROM "${table.schemaName}"."${table.tableName}"`];
+
+    // where
+    const resolvedWhereResult = resolveExpression(
+        typeof where === 'function' ? where(context) : where,
+        params.length + 1,
+        false
+    );
+    if (!resolvedWhereResult.ok) {
+        return err(
+            `delete("${table.schemaName}"."${table.tableName}") -> where -> ${resolvedWhereResult.error}`
+        );
+    }
+    if (resolvedWhereResult.value.text === '') {
+        return err(
+            `delete("${table.schemaName}"."${table.tableName}") -> where -> neutral`
+        );
+    }
+    params.push(...resolvedWhereResult.value.params);
+    tokens.push('WHERE', resolvedWhereResult.value.text);
+
+    // returning
+    const _returning =
+        typeof returning === 'function' ? returning(context) : returning;
+    if (_returning.length !== 0) {
+        const resolvedReturning = resolveReturning(
+            column => [(table as Table).columns[column].title, undefined],
+            _returning,
+            params.length + 1
+        );
+        if (!resolvedReturning.ok) {
+            return err(
+                `delete("${table.schemaName}"."${table.tableName}") -> ${resolvedReturning.error}`
+            );
+        }
+        params.push(...resolvedReturning.value.params);
+        tokens.push('RETURNING', resolvedReturning.value.text);
+    }
+
+    return ok({ sql: tokens.join(' '), params });
+};
+
+// join
+type JoinType = 'inner' | 'left' | 'right' | 'full';
+
+type TableWithAlias = {
+    table: TableBySchema;
+    alias: string;
+};
+
+type JoinData<SMap extends Record<string, Schema>> = {
+    joinType: JoinType;
+    on: boolean | ((contexts: SchemaMapContexts<SMap>) => boolean);
+};
+
+type SchemaMapKeys<SMap extends Record<string, Schema>> = {
+    [key in keyof SMap & string]: `${key}_${keyof SMap[key] & string}`;
+}[keyof SMap & string];
+
+type SchemaMapContexts<SMap extends Record<string, Schema>> = {
+    [key in keyof SMap & string as `${key}Context`]: Context<SMap[key]>;
+};
+
+type PrefixAliasOnSchema<S extends Schema, A extends string> = {
+    [key in keyof S as `${A}_${key & string}`]: S[key];
+};
+
+type JoinEntity<SMap extends Record<string, Schema>, AllS extends Schema> = {
+    contexts: SchemaMapContexts<SMap>;
+    select: <
+        const R extends (keyof AllS & string) | CustomColumn<unknown, string>
+    >(
+        returning: R[] | ((contexts: SchemaMapContexts<SMap>) => R[]),
+        where:
+            | (null | boolean)
+            | ((contexts: SchemaMapContexts<SMap>) => null | boolean),
+        options?: JoinSelectOptions<SMap>
+    ) => Query<AllS, R>;
+    join: <JS extends Schema, JA extends string>(
+        joinType: JoinType,
+        joinTable: TableBySchema<JS>,
+        joinAlias: JA,
+        on:
+            | boolean
+            | ((contexts: SchemaMapContexts<SMap & Record<JA, JS>>) => boolean)
+    ) => JoinEntity<SMap & Record<JA, JS>, AllS & PrefixAliasOnSchema<JS, JA>>;
+};
+
+type JoinSelectOptions<SMap extends Record<string, Schema>> = {
+    distinct?:
+        | (true | JoinBy<SMap>[])
+        | ((contexts: SchemaMapContexts<SMap>) => true | JoinBy<SMap>[]);
+    groupBy?:
+        | JoinBy<SMap>[]
+        | ((contexts: SchemaMapContexts<SMap>) => JoinBy<SMap>[]);
+    orders?:
+        | JoinOrder<SMap>[]
+        | ((contexts: SchemaMapContexts<SMap>) => JoinOrder<SMap>[]);
+    start?: bigint;
+    step?: number;
+    customQueryBuilder?: (
+        parts: Record<
+            `${'distinct' | 'returning' | 'from' | 'where' | 'groupBy' | 'orders' | 'pagination'}Part`,
+            string
+        >,
+        params: string[]
+    ) => QueryData;
+};
+
+type JoinBy<SMap extends Record<string, Schema>> =
+    | SchemaMapKeys<SMap>
+    | { expression: unknown };
+
+type JoinOrder<SMap extends Record<string, Schema>> = {
+    by: JoinBy<SMap>;
+    direction: OrderDirection;
+    nullPosition?: 'first' | 'last';
+};
+
+const createJoinSelectEntity = <
+    SMap extends Record<string, Schema>,
+    AllS extends Schema
+>(
+    main: TableWithAlias,
+    joinTables: (TableWithAlias & JoinData<SMap>)[],
+    contexts: SchemaMapContexts<SMap>
+): JoinEntity<SMap, AllS> => ({
+    contexts,
+    select: (returning, where, options = {}) =>
+        createQuery(params =>
+            createJoinSelectQuery(
+                contexts,
+                main,
+                joinTables,
+                returning,
+                where,
+                options,
+                params
+            )
+        ),
+    join: <JS extends Schema, JA extends string>(
+        joinType: JoinType,
+        joinTable: TableBySchema<JS>,
+        joinAlias: JA,
+        on:
+            | boolean
+            | ((contexts: SchemaMapContexts<SMap & Record<JA, JS>>) => boolean)
+    ): JoinEntity<
+        SMap & Record<JA, JS>,
+        AllS & PrefixAliasOnSchema<JS, JA>
+    > => {
+        joinTables.push({
+            table: joinTable,
+            on: on as
+                | boolean
+                | ((contexts: SchemaMapContexts<SMap>) => boolean),
+            joinType,
+            alias: joinAlias
+        });
+        return createJoinSelectEntity<
+            SMap & Record<JA, JS>,
+            AllS & PrefixAliasOnSchema<JS, JA>
+        >(
+            main,
+            joinTables as (TableWithAlias & JoinData<SMap & Record<JA, JS>>)[],
+            {
+                ...contexts,
+                [`${joinAlias}Context`]: createContext(joinTable, joinAlias)
+            } as SchemaMapContexts<SMap & Record<JA, JS>>
+        );
+    }
+});
+
+const createJoinSelectQuery = <SMap extends Record<string, Schema>>(
+    contexts: SchemaMapContexts<SMap>,
+    main: TableWithAlias,
+    joinTables: (TableWithAlias & JoinData<SMap>)[],
+    returning:
+        | ReturningRow[]
+        | ((contexts: SchemaMapContexts<SMap>) => ReturningRow[]),
+    where:
+        | (null | boolean)
+        | ((contexts: SchemaMapContexts<SMap>) => null | boolean),
+    options: JoinSelectOptions<SMap>,
+    params: string[]
+): Result<QueryData, string> => {
+    const errorPrefix = `join-select("${main.table.schemaName}"."${main.table.tableName}")`;
+    const allTables = [main, ...joinTables];
+    const {
+        distinct = false,
+        groupBy = [],
+        orders = [],
+        start,
+        step,
+        customQueryBuilder = defaultCustomQueryBuilder
+    } = options;
+
+    // distinct
+    let distinctPart = '';
+    const _distinct =
+        typeof distinct === 'function' ? distinct(contexts) : distinct;
+    if (_distinct === true) {
+        distinctPart = 'DISTINCT';
+    } else if (Array.isArray(_distinct)) {
+        const distinctTextArray = [];
+        for (const aDistinct of _distinct) {
+            if (typeof aDistinct === 'object') {
+                const resolvedExpression = resolveExpression(
+                    aDistinct.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedExpression.ok) {
+                    return err(
+                        `${errorPrefix} -> distinct -> ${_distinct.indexOf(aDistinct)} -> ${resolvedExpression.error}`
+                    );
+                }
+                params.push(...resolvedExpression.value.params);
+                distinctTextArray.push(resolvedExpression.value.text);
+            } else {
+                const { table, alias } = getTableDataOfJoinSelectColumn(
+                    allTables,
+                    aDistinct
+                );
+                distinctTextArray.push(
+                    resolveColumn(
+                        table,
+                        aDistinct.substring((alias + '_').length),
+                        true,
+                        alias
+                    )
+                );
+            }
+        }
+        distinctPart = `DISTINCT ON(${distinctTextArray.join(', ')})`;
+    }
+
+    // select
+    const _returning =
+        typeof returning === 'function' ? returning(contexts) : returning;
+    const resolvedReturning = resolveReturning(
+        column => {
+            const { table, alias } = getTableDataOfJoinSelectColumn(
+                allTables,
+                column
+            );
+            const columnKey = column.substring((alias + '_').length);
+            return [(table as Table).columns[columnKey].title, alias];
+        },
+        _returning,
+        params.length + 1
+    );
+    if (!resolvedReturning.ok) {
+        return err(`${errorPrefix} -> ${resolvedReturning.error}`);
+    }
+    params.push(...resolvedReturning.value.params);
+    const returningPart = resolvedReturning.value.text;
+
+    // join
+    let fromPart = `"${main.table.schemaName}"."${main.table.tableName}" "${main.alias}"`;
+    for (const joinTable of joinTables) {
+        const onExpressionResult = resolveExpression(
+            typeof joinTable.on === 'function'
+                ? joinTable.on(contexts)
+                : joinTable.on,
+            params.length + 1,
+            false
+        );
+        if (!onExpressionResult.ok) {
+            return err(
+                `${errorPrefix} -> join -> ${joinTables.indexOf(joinTable)} -> ${onExpressionResult.error}`
+            );
+        }
+        if (onExpressionResult.value.text === '') {
+            return err(
+                `${errorPrefix} -> join -> ${joinTables.indexOf(joinTable)} -> neutral`
+            );
+        }
+        params.push(...onExpressionResult.value.params);
+        fromPart += ` ${Dictionary.JoinType[joinTable.joinType]} "${joinTable.table.schemaName}"."${joinTable.table.tableName}" "${
+            joinTable.alias
+        }" ON ${onExpressionResult.value.text}`;
+    }
+
+    // where
+    const resolvedWhereResult = resolveExpression(
+        typeof where === 'function' ? where(contexts) : where,
+        params.length + 1,
+        false
+    );
+    if (!resolvedWhereResult.ok) {
+        return err(`${errorPrefix} -> where -> ${resolvedWhereResult.error}`);
+    }
+    if (resolvedWhereResult.value.text === '') {
+        return err(`${errorPrefix} -> where -> neutral`);
+    }
+    params.push(...resolvedWhereResult.value.params);
+    const wherePart = resolvedWhereResult.value.text;
+
+    // groupBy
+    let groupByPart = '';
+    const _groupBy =
+        typeof groupBy === 'function' ? groupBy(contexts) : groupBy;
+    if (_groupBy.length !== 0) {
+        const groupByTextArray = [];
+        for (const aGroupBy of _groupBy) {
+            if (typeof aGroupBy === 'object') {
+                const resolvedGroupBy = resolveExpression(
+                    aGroupBy.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedGroupBy.ok) {
+                    return err(
+                        `${errorPrefix} -> groupBy -> ${_groupBy.indexOf(aGroupBy)} -> ${resolvedGroupBy.error}`
+                    );
+                }
+                params.push(...resolvedGroupBy.value.params);
+                groupByTextArray.push(resolvedGroupBy.value.text);
+            } else {
+                const { table, alias } = getTableDataOfJoinSelectColumn(
+                    allTables,
+                    aGroupBy
+                );
+                groupByTextArray.push(
+                    resolveColumn(
+                        table,
+                        aGroupBy.substring((alias + '_').length),
+                        true,
+                        alias
+                    )
+                );
+            }
+        }
+        groupByPart = groupByTextArray.join(', ');
+    }
+
+    // orders
+    let ordersPart = '';
+    const _orders = typeof orders === 'function' ? orders(contexts) : orders;
+    if (_orders.length !== 0) {
+        const ordersTextArray = [];
+        for (const order of _orders) {
+            const { by, direction, nullPosition } = order;
+            const nullPositionText =
+                nullPosition !== undefined
+                    ? ' ' + Dictionary.OrderNullPosition[nullPosition]
+                    : '';
+            if (typeof by === 'object') {
+                const resolvedGroupBy = resolveExpression(
+                    by.expression,
+                    params.length + 1,
+                    false
+                );
+                if (!resolvedGroupBy.ok) {
+                    return err(
+                        `${errorPrefix} -> orderBy -> ${_orders.indexOf(order)} -> by -> ${resolvedGroupBy.error}`
+                    );
+                }
+                params.push(...resolvedGroupBy.value.params);
+                ordersTextArray.push(
+                    `${resolvedGroupBy.value.text} ${Dictionary.OrderDirection[direction]}${nullPositionText}`
+                );
+            } else {
+                const { table, alias } = getTableDataOfJoinSelectColumn(
+                    allTables,
+                    by
+                );
+                ordersTextArray.push(
+                    `${resolveColumn(
+                        table,
+                        by.substring((alias + '_').length),
+                        true,
+                        alias
+                    )} ${Dictionary.OrderDirection[direction]}${nullPositionText}`
+                );
+            }
+        }
+        ordersPart = ordersTextArray.join(', ');
+    }
+
+    // pagination
+    let paginationPart = '';
+    const paginationTextArray = [];
+    if (start !== undefined) {
+        if (start < 0) {
+            return err(`${errorPrefix} -> start -> invalid`);
+        }
+        paginationTextArray.push(`OFFSET ${start}`);
+    }
+    if (step !== undefined) {
+        if (step <= 0) {
+            return err(`${errorPrefix} -> step -> invalid`);
+        }
+        paginationTextArray.push(`LIMIT ${step}`);
+    }
+    if (paginationTextArray.length !== 0) {
+        paginationPart = paginationTextArray.join(' ');
+    }
+
+    return ok(
+        customQueryBuilder(
+            {
+                distinctPart,
+                returningPart,
+                fromPart,
+                wherePart,
+                groupByPart,
+                ordersPart,
+                paginationPart
+            },
+            params
+        )
+    );
+};
+
+const getTableDataOfJoinSelectColumn = (
+    tablesData: TableWithAlias[],
+    column: string
+): TableWithAlias => {
+    const splitColumn = column.split('_');
+    if (splitColumn.length < 2) {
+        throw `no separator`;
+    }
+
+    // in case alias or column key have "_". iterate on all of them until a match.
+    for (let i = 1; i < splitColumn.length; i++) {
+        const tableAlias = splitColumn.slice(0, i).join('_');
+        for (const tableData of tablesData) {
+            if (
+                tableData.alias === tableAlias &&
+                tableData.table.columns[splitColumn.slice(i).join('_')] !==
+                    undefined
+            ) {
+                return tableData;
+            }
+        }
+    }
+
+    throw `column not found`;
+};
+
+// util
+type OrderDirection = 'asc' | 'desc';
+
+// using 'one' instead of 1 is intentional. make using array.length for second parameter easier.
+type Mode = [] | ['count', number] | ['get', 'one' | number];
+
+type CustomColumn<T, N extends string> = {
+    expression: T;
+    name: N;
+};
+
+type NullableAndDefaultColumns<S extends Schema> = keyof {
+    [key in keyof S as true extends S[key]['nullable']
+        ? key
+        : true extends S[key]['default']
+          ? key
+          : never]: undefined;
+} &
+    string;
+
+type Query<
+    S extends Schema,
+    R extends keyof S | CustomColumn<unknown, string>
+> = {
+    getData: (params?: string[]) => Result<QueryData, string>;
+    execute: <const M extends Mode>(
+        client: ClientBase,
+        mode: M,
+        params?: string[]
+    ) => Promise<Result<QueryResult<S, R, M>, unknown>>;
+};
+
+type QueryData = {
+    sql: string;
+    params: string[];
+};
+
+type QueryResult<
+    S extends Schema,
+    R extends keyof S | CustomColumn<unknown, string>,
+    M extends Mode
+> = M extends ['get', 'one']
+    ? QueryResultRow<S, R>
+    : M extends ['count', number]
+      ? undefined
+      : QueryResultRow<S, R>[];
+
+type QueryResultRow<
+    S extends Schema,
+    R extends keyof S | CustomColumn<unknown, string>
+> = {
+    [key in R as key extends CustomColumn<unknown, infer T>
+        ? T
+        : key]: key extends CustomColumn<infer T, string>
+        ? T
+        : NullableType<
+              S[key & string]['narrowType'],
+              S[key & string]['nullable']
+          >;
+};
+
+type ReturningRow = string | CustomColumn<unknown, string>;
+
+const createQuery = <
+    S extends Schema,
+    const R extends keyof S | CustomColumn<unknown, string>
+>(
+    createQueryData: (params: string[]) => Result<QueryData, string>
+): Query<S, R> => {
+    let queryDataResult: Result<QueryData, string>;
+    return {
+        getData: (params = []) => {
+            if (queryDataResult === undefined) {
+                queryDataResult = createQueryData(params);
+            }
+            if (!queryDataResult.ok) {
+                return queryDataResult;
+            }
+            return queryDataResult;
+        },
+        execute: async <const M extends Mode>(
+            client: ClientBase,
+            mode: M,
+            params: string[] = []
+        ) => {
+            if (queryDataResult === undefined) {
+                queryDataResult = createQueryData(params);
+            }
+            if (!queryDataResult.ok) {
+                return Promise.resolve(queryDataResult);
+            }
+            return client
+                .query(
+                    queryDataResult.value.sql + ';',
+                    queryDataResult.value.params
+                )
+                .then(({ rows }) => resolveResult<S, R, M>(rows, mode))
+                .catch(e => err(e));
+        }
+    };
+};
+
+export {
+    createEntity,
+    defaultCustomQueryBuilder,
+    createSelectQuery,
+    createInsertQuery,
+    createUpdateQuery,
+    createDeleteQuery,
+    createJoinSelectEntity,
+    createJoinSelectQuery,
+    getTableDataOfJoinSelectColumn,
+    createQuery
+};
+export type {
+    By,
+    Order,
+    CustomQueryBuilder,
+    SelectOptions,
+    InsertOptions,
+    InsertingRow,
+    UpdateSets,
+    JoinType,
+    TableWithAlias,
+    JoinData,
+    SchemaMapKeys,
+    SchemaMapContexts,
+    PrefixAliasOnSchema,
+    JoinEntity,
+    JoinSelectOptions,
+    JoinBy,
+    JoinOrder,
+    OrderDirection,
+    Mode,
+    CustomColumn,
+    NullableAndDefaultColumns,
+    Query,
+    QueryData,
+    QueryResult,
+    QueryResultRow,
+    ReturningRow
+};
+

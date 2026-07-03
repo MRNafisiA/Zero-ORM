@@ -1,0 +1,47 @@
+{
+    "name": "zero-orm",
+    "version": "1.0.0",
+    "description": "A type-safe Mini-ORM for PostgreSQL with full IntelliSense support.",
+    "keywords": [
+        "orm",
+        "query-builder",
+        "postgres",
+        "sql",
+        "type-safe"
+    ],
+    "license": "MIT",
+    "author": "MRNafisiA <mnafisiasl@gmail.com>",
+    "files": [
+        "dist"
+    ],
+    "main": "./dist/src/index.js",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/MRNafisiA/Zero-ORM.git"
+    },
+    "scripts": {
+        "test": "jest ./tests",
+        "build": "tsc --build prd.tsconfig.json"
+    },
+    "devDependencies": {
+        "@types/jest": "^29.5.14",
+        "@types/node": "^24.13.2",
+        "@types/pg": "^8.20.0",
+        "@typescript-eslint/eslint-plugin": "^8.62.0",
+        "@typescript-eslint/parser": "^8.62.0",
+        "eslint": "^10.6.0",
+        "eslint-config-prettier": "^10.1.8",
+        "jest": "^30.4.2",
+        "prettier": "^3.8.5",
+        "ts-jest": "^29.4.11",
+        "typescript": "^5.9.3"
+    },
+    "peerDependencies": {
+        "decimal.js": "10.6.0"
+    },
+    "dependencies": {
+        "decimal.js": "10.6.0",
+        "never-catch": "1.1.0"
+    },
+    "types": "./dist/src/index.d.ts"
+}
