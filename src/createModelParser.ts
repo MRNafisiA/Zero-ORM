@@ -70,7 +70,13 @@ const Parser = {
         nullable = false as N
     ): NullableType<number, N> | undefined => {
         const _v = Parser.number(v, nullable);
-        return typeof _v === 'number' ? Math.trunc(_v) : _v;
+
+        return _v === null ||
+            (typeof _v === 'number' &&
+                Math.trunc(_v) === _v &&
+                Number.isSafeInteger(_v))
+            ? _v
+            : undefined;
     },
     bigInt: <N extends boolean = false>(
         v: unknown,

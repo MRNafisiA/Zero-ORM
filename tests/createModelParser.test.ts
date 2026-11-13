@@ -237,7 +237,7 @@ describe('Parser', () => {
             expect(result).toStrictEqual(null);
         });
         test('number', () => {
-            const result = Parser.integer(1.2);
+            const result = Parser.integer(1);
 
             expect(result).toStrictEqual(1);
         });
@@ -765,4 +765,3 @@ describe('createModelUtils', () => {
         });
     });
 });
-
