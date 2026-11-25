@@ -199,12 +199,34 @@ const Dictionary = {
         [OperatorCode.JsonIndex]: 'json-index access',
         [OperatorCode.JsonIndexChain]: 'json-index chain access',
         [OperatorCode.JsonIndexText]: 'json-index text access',
+        [OperatorCode.JsonQuery]: 'json-path match (@@)',
         [OperatorCode.SubQuery]: 'sub-query',
         [OperatorCode.SubQueryExist]: 'row exists in sub-query'
     }
 } as const;
 
-export { OperatorCode, OperatorMap, Dictionary };
+// expressions built by the U.* helpers are tagged, so plain arrays (e.g. JSON arrays) are never mistaken for them.
+const ExpressionTag = Symbol.for('zero-orm.expression');
+
+// tagged tuples are frozen so they cannot be changed after construction.
+// direct array elements (operand lists, function args, IN lists, cases) are copied and frozen too,
+// so mutating the array the caller passed in does not affect the expression either.
+const tagExpression = <T extends unknown[]>(tuple: T): T => {
+    for (let i = 0; i < tuple.length; i++) {
+        const item = tuple[i];
+        if (Array.isArray(item) && !isExpression(item)) {
+            tuple[i] = Object.freeze([...item]);
+        }
+    }
+    Object.defineProperty(tuple, ExpressionTag, { value: true });
+    return Object.freeze(tuple);
+};
+
+const isExpression = (value: unknown): value is any[] =>
+    Array.isArray(value) &&
+    (value as unknown as Record<symbol, unknown>)[ExpressionTag] === true;
+
+export { OperatorCode, OperatorMap, Dictionary, tagExpression, isExpression };
 export type {
     ArithmeticOperator,
     JsonOperator,

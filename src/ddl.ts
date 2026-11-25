@@ -20,13 +20,17 @@ const generateCreateSequencesSQL = (
             continue;
         }
 
+        const sequenceName = getSequenceName(
+            table.schemaName,
+            table.tableName,
+            key,
+            column
+        );
         const tokens = ['CREATE SEQUENCE'];
         if (applyIfNotExist) {
             tokens.push('IF NOT EXISTS');
         }
-        tokens.push(
-            getSequenceName(table.schemaName, table.tableName, key, column)
-        );
+        tokens.push(sequenceName);
 
         switch (column.type as 'int2' | 'int4') {
             case 'int2':
@@ -37,11 +41,11 @@ const generateCreateSequencesSQL = (
                 break;
         }
 
-        if (owner !== undefined) {
-            tokens.push(`OWNER TO ${owner}`);
-        }
-
         queries.push(tokens.join(' '));
+
+        if (owner !== undefined) {
+            queries.push(`ALTER SEQUENCE ${sequenceName} OWNER TO ${owner}`);
+        }
     }
     return queries;
 };
@@ -63,7 +67,7 @@ const generateDropSequencesSQL = (
         }
 
         queries.push(
-            `DROP ${applyIfExist ? 'IF EXISTS ' : ''}SEQUENCE ${getSequenceName(table.schemaName, table.tableName, key, column)}`
+            `DROP SEQUENCE ${applyIfExist ? 'IF EXISTS ' : ''}${getSequenceName(table.schemaName, table.tableName, key, column)}`
         );
     }
     return queries;
@@ -83,17 +87,7 @@ const generateCreateTableSQL = (
         Table['columns'][string]
     ][];
     const columns = columnsAsEntries.map(([key, column]) => {
-        const tokens = [
-            `"${column.title ?? key}" ` +
-                (column.type.startsWith('custom(') && column.type.endsWith(')')
-                    ? column.type.substring(
-                          'custom('.length,
-                          column.type.length - 1
-                      )
-                    : Dictionary.PostgresType[
-                          column.type as Exclude<PgType, `custom(${string})`>
-                      ])
-        ];
+        const tokens = [`"${column.title ?? key}" ${getColumnTypeSQL(column)}`];
 
         // default
         if (column.default) {
@@ -158,14 +152,41 @@ const generateCreateTableSQL = (
         );
     }
 
-    return `CREATE ${isTemp ? 'TEMPORARY ' : ''}TABLE ${applyIfNotExist ? 'IF NOT EXIST ' : ''}"${table.schemaName}"."${table.tableName}"(${[...columns, ...constraints].join(', ')})${owner !== undefined ? ` OWNER TO ${owner}` : ''}`;
+    const tableName = `"${table.schemaName}"."${table.tableName}"`;
+    const createSQL = `CREATE ${isTemp ? 'TEMPORARY ' : ''}TABLE ${applyIfNotExist ? 'IF NOT EXISTS ' : ''}${tableName}(${[...columns, ...constraints].join(', ')})`;
+
+    // CREATE TABLE has no OWNER clause; ownership is set with a second statement.
+    return owner !== undefined
+        ? `${createSQL}; ALTER TABLE ${tableName} OWNER TO ${owner}`
+        : createSQL;
+};
+
+const getColumnTypeSQL = (column: Table['columns'][string]) => {
+    if (column.type.startsWith('custom(') && column.type.endsWith(')')) {
+        return column.type.substring('custom('.length, column.type.length - 1);
+    }
+    const typeSQL =
+        Dictionary.PostgresType[
+            column.type as Exclude<PgType, `custom(${string})`>
+        ];
+    switch (column.type) {
+        case 'decimal':
+            return `${typeSQL}(${column.precision}, ${column.scale})`;
+        case 'char':
+        case 'varchar':
+            return column.maxLength !== undefined
+                ? `${typeSQL}(${column.maxLength})`
+                : typeSQL;
+        default:
+            return typeSQL;
+    }
 };
 
 const generateDropTableSQL = (
     table: TableBySchema,
     { applyIfExist = false }: { applyIfExist?: boolean } = {}
 ) =>
-    `DROP TABLE ${applyIfExist ? 'IF EXIST ' : ''}"${table.schemaName}"."${table.tableName}"`;
+    `DROP TABLE ${applyIfExist ? 'IF EXISTS ' : ''}"${table.schemaName}"."${table.tableName}"`;
 
 const getSequenceName = (
     schemaName: string,

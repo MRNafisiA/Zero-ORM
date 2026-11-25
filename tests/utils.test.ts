@@ -10,7 +10,6 @@ import {
     raw,
     cons,
     json,
-    value,
     column,
     concat,
     ignore,
@@ -21,12 +20,6 @@ import {
     switchCase,
     subQueryExist
 } from '../src/utils';
-
-test('value', () => {
-    const result = value('a');
-
-    expect(result).toStrictEqual([OperatorCode.Value, 'a']);
-});
 
 describe('arithmetic', () => {
     test('two', () => {
@@ -228,3 +221,19 @@ describe('stringify', () => {
     });
 });
 
+describe('stringify regressions', () => {
+    test('inline string escapes single quotes', () => {
+        expect(stringify("O'Brien", true)).toStrictEqual(`'O''Brien'`);
+    });
+    test('inline json escapes single quotes', () => {
+        expect(stringify({ name: "O'Brien" }, true)).toStrictEqual(
+            `'{"name":"O''Brien"}'::JSONB`
+        );
+    });
+    test('inline NaN and Infinity are quoted', () => {
+        expect(stringify(NaN, true)).toStrictEqual(`'NaN'`);
+        expect(stringify(Infinity, true)).toStrictEqual(`'Infinity'`);
+        expect(stringify(-Infinity, true)).toStrictEqual(`'-Infinity'`);
+        expect(stringify(NaN, false)).toStrictEqual('NaN');
+    });
+});

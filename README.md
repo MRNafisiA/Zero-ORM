@@ -44,7 +44,6 @@
         - [U.raw](#uraw)
         - [U.ignore](#uignore)
         - [U.column](#ucolumn)
-        - [U.value](#uvalue)
     - [Context](#context)
     - [Execution Mode](#execution-mode)
     - [SELECT Operations](#select-operations)
@@ -1195,36 +1194,6 @@ console.log(
     User.select(
         ['id'],
         U.compare(U.column(User.table, 'id', false), '=', 1)
-    ).getData()
-);
-```
-
-### U.value
-
-Use `U.value` to wrap a value explicitly. Generally, Zero-ORM detects types properly, and there is usually no need to
-wrap your values.  
-**Attention:** USING `U.value` IS **REQUIRED ONLY WHEN PASSING A JSON ARRAY**. (Why? It interferes with Zero-ORM's
-internal type system.)
-
-```typescript
-import { U } from 'zero-orm';
-import { User } from './User';
-
-console.log(
-    User.select(
-        ['id'],
-        U.and(
-            U.compare(
-                U.value(1), //          Unnecessary wrapping
-                '=',
-                2
-            ),
-            U.compare(
-                U.value(['green']), //  Correct and required wrapping
-                '=',
-                ['blue', 'red'] //      Unwrapped value when wrapping is necessary. This causes unexpected behavior!
-            )
-        )
     ).getData()
 );
 ```

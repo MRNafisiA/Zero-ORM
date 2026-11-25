@@ -4,6 +4,7 @@ import { err, ok } from 'never-catch';
 import { Context, createContext } from '../src/context';
 import { createTable, Schema, SchemaByColumns } from '../src/Table';
 import {
+    Query,
     createQuery,
     createEntity,
     createDeleteQuery,
@@ -1094,7 +1095,7 @@ describe('createQuery', () => {
     test('ok', async () => {
         const mockCreateQueryData = jest
             .fn()
-            .mockImplementationOnce((params: string[]) =>
+            .mockImplementation((params: string[]) =>
                 ok({ sql: 'a', params: [...params, 'b'] })
             );
         const mockClient = {
@@ -1111,8 +1112,33 @@ describe('createQuery', () => {
             ok({ sql: 'a', params: ['c', 'b'] })
         );
         expect(executeResult).toStrictEqual(ok([]));
-        expect(mockCreateQueryData.mock.calls).toStrictEqual([[['c']]]);
-        expect(mockClient.query.mock.calls).toStrictEqual([['a;', ['c', 'b']]]);
+        // built per call, so execute does not reuse the params given to getData
+        expect(mockCreateQueryData.mock.calls).toStrictEqual([[['c']], [[]]]);
+        expect(mockClient.query.mock.calls).toStrictEqual([['a;', ['b']]]);
+    });
+    test('sub-query reused at another params offset', () => {
+        const subQuery = User.select(['id'], context =>
+            context.compare('username', '=', 'x')
+        );
+        subQuery.getData();
+
+        const result = User.select(['id'], context =>
+            U.and(
+                context.compare('username', '=', 'y'),
+                context.compare(
+                    'id',
+                    'in sub-query',
+                    subQuery as Query<Schema, never>
+                )
+            )
+        ).getData();
+
+        expect(result).toStrictEqual(
+            ok({
+                sql: 'SELECT "ID" AS "id" FROM "public"."user" WHERE ("username" = $1 AND "ID" IN (SELECT "ID" AS "id" FROM "public"."user" WHERE "username" = $2))',
+                params: ['y', 'x']
+            })
+        );
     });
     test('throw', async () => {
         const mockCreateQueryData = jest
@@ -1128,5 +1154,76 @@ describe('createQuery', () => {
         );
 
         expect(executeResult).toStrictEqual(err('c'));
+    });
+});
+
+describe('regressions', () => {
+    const PostTable = createTable({
+        schemaName: 'public',
+        tableName: 'post',
+        columns: {
+            id: { type: 'int4', nullable: false, default: false },
+            author: {
+                type: 'text',
+                nullable: false,
+                default: true,
+                defaultValue: ['js', "O'Brien"]
+            },
+            tags: { type: 'jsonb', nullable: true, default: false },
+            updatedAt: {
+                type: 'timestamptz',
+                nullable: false,
+                default: true,
+                defaultValue: ['updated-at']
+            }
+        }
+    });
+    const Post = createEntity(PostTable);
+
+    test('insert escapes quotes in js default values', () => {
+        const result = Post.insert([{ id: 1 }], []).getData();
+
+        expect(result.ok && result.value.sql).toContain(`'O''Brien'`);
+    });
+    test('insert sends a plain JSON array as a JSONB param', () => {
+        const result = Post.insert(
+            [{ id: 1, author: 'a', tags: [17, '1); DROP TABLE x; --'] }],
+            []
+        ).getData();
+
+        expect(result.ok && result.value.sql).toMatch(
+            /^INSERT INTO "public"\."post" \("id", "author", "updatedAt", "tags"\) VALUES \(1, \$1, '[^']+', \$2::JSONB\)$/
+        );
+        expect(result.ok && result.value.params).toStrictEqual([
+            'a',
+            '[17,"1); DROP TABLE x; --"]'
+        ]);
+    });
+    test('update keeps an explicit value for an updated-at column', () => {
+        const result = Post.update(
+            { updatedAt: new Date(0) },
+            true,
+            []
+        ).getData();
+
+        expect(result).toStrictEqual(
+            ok({
+                sql: `UPDATE "public"."post" SET "updatedAt" = '1970-01-01T00:00:00.000Z' WHERE TRUE`,
+                params: []
+            })
+        );
+    });
+    test('branching a join does not change its sibling', () => {
+        const base = User.join('u', 'inner', LaptopTable, 'l', true);
+        base.join('left', LaptopTable, 'm', true);
+
+        const result = base.select(['u_username'], true).getData();
+
+        expect(result).toStrictEqual(
+            ok({
+                sql: `SELECT "u"."username" AS "u_username" FROM "public"."user" "u" INNER JOIN "public"."laptop" "l" ON TRUE WHERE TRUE`,
+                params: []
+            })
+        );
     });
 });

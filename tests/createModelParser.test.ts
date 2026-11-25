@@ -765,3 +765,73 @@ describe('createModelUtils', () => {
         });
     });
 });
+
+describe('regressions', () => {
+    const ProductParser = createModelParser(
+        createTable({
+            schemaName: 'public',
+            tableName: 'product',
+            columns: {
+                price: {
+                    type: 'decimal',
+                    nullable: false,
+                    default: false,
+                    precision: 5,
+                    scale: 2
+                },
+                whole: {
+                    type: 'decimal',
+                    nullable: false,
+                    default: false,
+                    precision: 3,
+                    scale: 0
+                },
+                note: { type: 'text', nullable: true, default: false },
+                ref: { type: 'uuid', nullable: true, default: false }
+            }
+        })
+    );
+
+    test('decimal allows only precision - scale integer digits', () => {
+        expect(ProductParser.price('999.99')).toStrictEqual(
+            new Decimal('999.99')
+        );
+        expect(ProductParser.price('9999.9')).toStrictEqual(undefined);
+        expect(ProductParser.price('0')).toStrictEqual(new Decimal('0'));
+    });
+    test('decimal counts trailing zeros of the integer part', () => {
+        expect(ProductParser.whole('100')).toStrictEqual(new Decimal('100'));
+        expect(ProductParser.whole('100000')).toStrictEqual(undefined);
+    });
+    test('decimal rejects NaN and Infinity', () => {
+        expect(ProductParser.whole('NaN')).toStrictEqual(undefined);
+        expect(ProductParser.whole('Infinity')).toStrictEqual(undefined);
+    });
+    test('bigInt rejects non-integer numbers instead of throwing', () => {
+        expect(Parser.bigInt(1.5)).toStrictEqual(undefined);
+        expect(Parser.bigInt(NaN)).toStrictEqual(undefined);
+        expect(Parser.bigInt(Infinity)).toStrictEqual(undefined);
+    });
+    test('blank strings are not numbers', () => {
+        expect(Parser.number('')).toStrictEqual(undefined);
+        expect(Parser.number('  ')).toStrictEqual(undefined);
+        expect(Parser.integer('')).toStrictEqual(undefined);
+        expect(Parser.bigInt('')).toStrictEqual(undefined);
+        expect(Parser.bigInt('  ')).toStrictEqual(undefined);
+    });
+    test('json rejects values JSON.stringify cannot handle', () => {
+        const circular: Record<string, unknown> = {};
+        circular.self = circular;
+
+        expect(Parser.json({ a: BigInt(1) })).toStrictEqual(undefined);
+        expect(Parser.json(circular)).toStrictEqual(undefined);
+    });
+    test('the text "null" stays a string in text columns', () => {
+        expect(Parser.string('null', true)).toStrictEqual('null');
+        expect(ProductParser.note('NULL')).toStrictEqual('NULL');
+        expect(ProductParser.note(null)).toStrictEqual(null);
+    });
+    test('the text "null" is still NULL in uuid columns', () => {
+        expect(ProductParser.ref('null')).toStrictEqual(null);
+    });
+});

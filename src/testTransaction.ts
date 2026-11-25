@@ -88,17 +88,19 @@ const testTransaction = async (
                 if (!selectResult.ok) {
                     return returnAction([JSON.stringify(selectResult.error)]);
                 }
-                const alLRows = [...selectResult.value];
+                const allRows = selectResult.value;
+                // indexes into allRows that no final row has matched yet
+                const unmatched = allRows.map((_, index) => index);
 
                 for (const finalRow of finalData) {
                     let i = -1;
-                    for (let j = 0; j < selectResult.value.length; j++) {
+                    for (let j = 0; j < unmatched.length; j++) {
                         if (
                             await isRowEqual(
-                                selectResult.value[j],
+                                allRows[unmatched[j]],
                                 finalRow,
-                                alLRows,
-                                j
+                                allRows,
+                                unmatched[j]
                             )
                         ) {
                             i = j;
@@ -111,15 +113,15 @@ const testTransaction = async (
                                 JSON.stringify(finalRow, null, 4)
                         );
                     } else {
-                        selectResult.value.splice(i, 1);
+                        unmatched.splice(i, 1);
                     }
                 }
 
                 differences.push(
-                    ...selectResult.value.map(
-                        v =>
+                    ...unmatched.map(
+                        index =>
                             '\ndb row without match:\n' +
-                            JSON.stringify(v, null, 4)
+                            JSON.stringify(allRows[index], null, 4)
                     )
                 );
             }
@@ -131,8 +133,9 @@ const testTransaction = async (
         },
         isolationLevel
     ).then(result => {
-        if (!result.ok && result.error !== undefined) {
-            throw result.error.join('\n');
+        const differences = result.ok ? result.value : result.error;
+        if (differences !== undefined) {
+            throw differences.join('\n');
         }
     });
 
@@ -184,6 +187,13 @@ const isRowEqual = async (
 const isEqual = (a: unknown, b: unknown): boolean => {
     if (a === b) {
         return true;
+    }
+    if (a instanceof Date || b instanceof Date) {
+        return (
+            a instanceof Date &&
+            b instanceof Date &&
+            Object.is(a.getTime(), b.getTime())
+        );
     }
     if (
         typeof a === 'object' &&

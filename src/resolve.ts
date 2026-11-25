@@ -5,7 +5,7 @@ import * as U from './utils';
 import Decimal from 'decimal.js';
 import { err, ok, Result } from 'never-catch';
 import { Schema, TableBySchema } from './Table';
-import { Dictionary, OperatorCode } from './keywords';
+import { Dictionary, OperatorCode, isExpression } from './keywords';
 import { CustomColumn, Mode, QueryResult } from './entity';
 
 type PartialQuery = { text: string; params: string[] };
@@ -49,7 +49,7 @@ const resolveExpression = (
             partialQuery(`$${paramsStart++}`, [U.stringify(expression, false)])
         );
     }
-    if (!Array.isArray(expression)) {
+    if (!isExpression(expression)) {
         return ok(
             partialQuery(`$${paramsStart++}::JSONB`, [
                 U.stringify(expression, false)
@@ -297,12 +297,10 @@ const resolveExpression = (
                     );
                 }
             }
-            params.push(...whenResult.value.params);
-            paramsStart += whenResult.value.params.length;
 
             const thenResult = resolveExpression(
                 item.then,
-                paramsStart,
+                paramsStart + whenResult.value.params.length,
                 ignore
             );
             if (!thenResult.ok) {
@@ -321,8 +319,9 @@ const resolveExpression = (
                     );
                 }
             }
-            params.push(...thenResult.value.params);
-            paramsStart += thenResult.value.params.length;
+            params.push(...whenResult.value.params, ...thenResult.value.params);
+            paramsStart +=
+                whenResult.value.params.length + thenResult.value.params.length;
 
             if (tokens.length === 0) {
                 tokens.push('CASE');
@@ -460,19 +459,21 @@ const resolveExpression = (
             );
         }
 
+        params.push(...subQueryResult.value.params.slice(paramsStart - 1));
+
         switch (operator) {
             case OperatorCode.InListSubQuery:
                 return ok(
                     partialQuery(
                         `${expressionResult.value.text} IN (${subQueryResult.value.sql})`,
-                        subQueryResult.value.params.slice(paramsStart - 1)
+                        params
                     )
                 );
             case OperatorCode.NotInListSubQuery:
                 return ok(
                     partialQuery(
                         `${expressionResult.value.text} NOT IN (${subQueryResult.value.sql})`,
-                        subQueryResult.value.params.slice(paramsStart - 1)
+                        params
                     )
                 );
         }
@@ -488,6 +489,7 @@ const resolveExpression = (
         operator === OperatorCode.JsonExist ||
         operator === OperatorCode.JsonRightExist ||
         operator === OperatorCode.JsonLeftExist ||
+        operator === OperatorCode.JsonQuery ||
         operator === OperatorCode.JsonRemove ||
         operator === OperatorCode.JsonIndex ||
         operator === OperatorCode.JsonIndexText
@@ -604,6 +606,13 @@ const resolveExpression = (
                         params
                     )
                 );
+            case OperatorCode.JsonQuery:
+                return ok(
+                    partialQuery(
+                        `${expression1Result.value.text} @@ ${expression2Result.value.text}`,
+                        params
+                    )
+                );
             case OperatorCode.JsonRemove:
                 return ok(
                     partialQuery(
@@ -675,7 +684,7 @@ const resolveExpression = (
                     continue;
                 } else {
                     return err(
-                        `${Dictionary.OperatorDescriptions[operator]} -> second operand -> ${expression[1].indexOf(item)} -> neutral`
+                        `${Dictionary.OperatorDescriptions[operator]} -> second operand -> ${expression[2].indexOf(item)} -> neutral`
                     );
                 }
             }
@@ -911,11 +920,7 @@ const resolveExpression = (
         }
     }
 
-    return ok(
-        partialQuery(`$${paramsStart++}::JSONB`, [
-            U.stringify(expression, false)
-        ])
-    );
+    return err(`unknown operator code: ${String(operator)}`);
 };
 
 const resolveColumn = (
@@ -1032,4 +1037,3 @@ export {
     resolveReturning,
     resolveResult
 };
-

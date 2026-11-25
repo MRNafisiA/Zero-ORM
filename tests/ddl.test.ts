@@ -88,7 +88,8 @@ describe('generateCreateSequencesSQL', () => {
                 });
 
                 expect(result).toStrictEqual([
-                    'CREATE SEQUENCE "public"."user_group_id_seq" AS SMALLINT OWNER TO USER'
+                    'CREATE SEQUENCE "public"."user_group_id_seq" AS SMALLINT',
+                    'ALTER SEQUENCE "public"."user_group_id_seq" OWNER TO USER'
                 ]);
             });
         });
@@ -110,8 +111,10 @@ describe('generateCreateSequencesSQL', () => {
                 });
 
                 expect(result).toStrictEqual([
-                    'CREATE SEQUENCE "public"."user_ID_seq" AS INTEGER OWNER TO USER',
-                    'CREATE SEQUENCE "public"."user_code_seq" OWNER TO USER'
+                    'CREATE SEQUENCE "public"."user_ID_seq" AS INTEGER',
+                    'ALTER SEQUENCE "public"."user_ID_seq" OWNER TO USER',
+                    'CREATE SEQUENCE "public"."user_code_seq"',
+                    'ALTER SEQUENCE "public"."user_code_seq" OWNER TO USER'
                 ]);
             });
         });
@@ -134,7 +137,8 @@ describe('generateCreateSequencesSQL', () => {
                 });
 
                 expect(result).toStrictEqual([
-                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_group_id_seq" AS SMALLINT OWNER TO USER'
+                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_group_id_seq" AS SMALLINT',
+                    'ALTER SEQUENCE "public"."user_group_id_seq" OWNER TO USER'
                 ]);
             });
         });
@@ -156,8 +160,10 @@ describe('generateCreateSequencesSQL', () => {
                 });
 
                 expect(result).toStrictEqual([
-                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_ID_seq" AS INTEGER OWNER TO USER',
-                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_code_seq" OWNER TO USER'
+                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_ID_seq" AS INTEGER',
+                    'ALTER SEQUENCE "public"."user_ID_seq" OWNER TO USER',
+                    'CREATE SEQUENCE IF NOT EXISTS "public"."user_code_seq"',
+                    'ALTER SEQUENCE "public"."user_code_seq" OWNER TO USER'
                 ]);
             });
         });
@@ -181,8 +187,8 @@ describe('generateDropSequencesSQL', () => {
         });
 
         expect(result).toStrictEqual([
-            'DROP IF EXISTS SEQUENCE "public"."user_ID_seq"',
-            'DROP IF EXISTS SEQUENCE "public"."user_code_seq"'
+            'DROP SEQUENCE IF EXISTS "public"."user_ID_seq"',
+            'DROP SEQUENCE IF EXISTS "public"."user_code_seq"'
         ]);
     });
 });
@@ -214,7 +220,7 @@ describe('generateCreateTableSQL', () => {
                     `CREATE TABLE "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
-                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")) OWNER TO USER'
+                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")); ALTER TABLE "public"."user" OWNER TO USER'
                 );
             });
         });
@@ -243,7 +249,7 @@ describe('generateCreateTableSQL', () => {
                     `CREATE TEMPORARY TABLE "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
-                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")) OWNER TO USER'
+                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")); ALTER TABLE "public"."user" OWNER TO USER'
                 );
             });
         });
@@ -257,7 +263,7 @@ describe('generateCreateTableSQL', () => {
                 });
 
                 expect(result).toStrictEqual(
-                    `CREATE TABLE IF NOT EXIST "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
+                    `CREATE TABLE IF NOT EXISTS "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
                         'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code"))'
@@ -271,10 +277,10 @@ describe('generateCreateTableSQL', () => {
                 });
 
                 expect(result).toStrictEqual(
-                    `CREATE TABLE IF NOT EXIST "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
+                    `CREATE TABLE IF NOT EXISTS "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
-                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")) OWNER TO USER'
+                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")); ALTER TABLE "public"."user" OWNER TO USER'
                 );
             });
         });
@@ -286,7 +292,7 @@ describe('generateCreateTableSQL', () => {
                 });
 
                 expect(result).toStrictEqual(
-                    `CREATE TEMPORARY TABLE IF NOT EXIST "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
+                    `CREATE TEMPORARY TABLE IF NOT EXISTS "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
                         'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code"))'
@@ -300,10 +306,10 @@ describe('generateCreateTableSQL', () => {
                 });
 
                 expect(result).toStrictEqual(
-                    `CREATE TEMPORARY TABLE IF NOT EXIST "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
+                    `CREATE TEMPORARY TABLE IF NOT EXISTS "public"."user"("ID" INTEGER DEFAULT NEXTVAL('"public"."user_ID_seq"'::REGCLASS) NOT NULL, ` +
                         '"userGroupID" SMALLINT NOT NULL REFERENCES "public"."user_group"("id") ON UPDATE NO ACTION ON DELETE CASCADE, ' +
                         `"username" CHARACTER VARYING NULL, "level" SMALLINT DEFAULT 1 NOT NULL, "code" BIGINT DEFAULT NEXTVAL('"public"."user_code_seq"'::REGCLASS) NOT NULL, "dateRange" DateRange NOT NULL, ` +
-                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")) OWNER TO USER'
+                        'CONSTRAINT "user_pk" PRIMARY KEY("ID", "code")); ALTER TABLE "public"."user" OWNER TO USER'
                 );
             });
         });
@@ -319,7 +325,7 @@ describe('generateDropTableSQL', () => {
     test('applyIfExist: true', () => {
         const result = generateDropTableSQL(UserTable, { applyIfExist: true });
 
-        expect(result).toStrictEqual('DROP TABLE IF EXIST "public"."user"');
+        expect(result).toStrictEqual('DROP TABLE IF EXISTS "public"."user"');
     });
 });
 
@@ -343,5 +349,47 @@ describe('getSequenceName', () => {
         const result = getSequenceName('a', 'b', 'c', {});
 
         expect(result).toStrictEqual('"a"."b_c_seq"');
+    });
+});
+
+describe('column types', () => {
+    test('decimal precision and scale, char and varchar length', () => {
+        const result = generateCreateTableSQL(
+            createTable({
+                schemaName: 'public',
+                tableName: 'product',
+                columns: {
+                    price: {
+                        type: 'decimal',
+                        nullable: false,
+                        default: false,
+                        precision: 10,
+                        scale: 2
+                    },
+                    code: {
+                        type: 'char',
+                        nullable: false,
+                        default: false,
+                        maxLength: 4
+                    },
+                    name: {
+                        type: 'varchar',
+                        nullable: false,
+                        default: false,
+                        maxLength: 50
+                    },
+                    note: {
+                        type: 'varchar',
+                        nullable: true,
+                        default: false
+                    }
+                }
+            })
+        );
+
+        expect(result).toStrictEqual(
+            'CREATE TABLE "public"."product"("price" NUMERIC(10, 2) NOT NULL, "code" CHARACTER(4) NOT NULL, ' +
+                '"name" CHARACTER VARYING(50) NOT NULL, "note" CHARACTER VARYING NULL)'
+        );
     });
 });

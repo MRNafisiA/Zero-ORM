@@ -15,6 +15,10 @@ const Int8Range = {
     max: BigInt('9223372036854775807')
 };
 
+// Decimal.precision() ignores trailing zeros (1000 -> 1), so count the integer part explicitly.
+const countIntegerDigits = (v: Decimal) =>
+    v.abs().lt(1) ? 0 : v.abs().trunc().precision(true);
+
 const Parser = {
     boolean: <N extends boolean = false>(
         v: unknown,
@@ -59,6 +63,10 @@ const Parser = {
         if (typeof v === 'number') {
             return v;
         } else if (typeof v === 'string') {
+            // Number('') and Number('  ') are 0.
+            if (v.trim() === '') {
+                return undefined;
+            }
             const _v = Number(v);
             return Number.isNaN(_v) ? undefined : _v;
         } else {
@@ -93,8 +101,13 @@ const Parser = {
             case 'bigint':
                 return v;
             case 'number':
-                return BigInt(v);
+                // BigInt() throws on fractions, NaN and Infinity.
+                return Number.isInteger(v) ? BigInt(v) : undefined;
             case 'string':
+                // BigInt('') and BigInt('  ') are 0n.
+                if (v.trim() === '') {
+                    return undefined;
+                }
                 try {
                     return BigInt(v);
                 } catch (_) {
@@ -135,11 +148,7 @@ const Parser = {
         v: unknown,
         nullable = false as N
     ): NullableType<string, N> | undefined => {
-        if (
-            nullable &&
-            (v === null ||
-                (typeof v === 'string' && v.toLowerCase() === 'null'))
-        ) {
+        if (nullable && v === null) {
             return null as NullableType<string, N>;
         }
         switch (typeof v) {
@@ -178,13 +187,18 @@ const Parser = {
         nullable = false as N
     ): NullableType<Date, N> | undefined => {
         const _v = Parser.dateTime(v, nullable);
-        if (
-            _v instanceof Date &&
-            _v.toISOString().split('T')[1] !== '00:00:00.000Z'
-        ) {
-            return undefined;
+        if (!(_v instanceof Date)) {
+            return _v;
         }
-        return _v;
+        if (
+            _v.getUTCHours() === 0 &&
+            _v.getUTCMinutes() === 0 &&
+            _v.getUTCSeconds() === 0 &&
+            _v.getUTCMilliseconds() === 0
+        ) {
+            return _v;
+        }
+        return undefined;
     },
     json: <N extends boolean = false>(
         v: unknown,
@@ -197,9 +211,10 @@ const Parser = {
         ) {
             return null as NullableType<Json, N>;
         }
-        const _v = typeof v !== 'string' ? JSON.stringify(v) : v;
         try {
-            const parsedV = JSON.parse(_v);
+            const parsedV = JSON.parse(
+                typeof v !== 'string' ? JSON.stringify(v) : v
+            );
             if (typeof parsedV !== 'object' || parsedV === null) {
                 return undefined;
             }
@@ -368,9 +383,11 @@ const createModelParser = <
                                     _v.comparedTo(column.min) >= 0) &&
                                 (column.max === undefined ||
                                     _v.comparedTo(column.max) <= 0) &&
+                                _v.isFinite() &&
                                 _v.decimalPlaces() <= column.scale &&
-                                _v.precision() - _v.decimalPlaces() <=
-                                    column.precision
+                                // NUMERIC(p, s) allows at most p - s digits before the point.
+                                countIntegerDigits(_v) <=
+                                    column.precision - column.scale
                             ) {
                                 return _v;
                             }
@@ -382,6 +399,16 @@ const createModelParser = <
                     case 'text':
                     case 'uuid':
                         defaultParser = (v: unknown, nullable: boolean) => {
+                            // "null" can never be a uuid, so it still means NULL there.
+                            if (
+                                column.type === 'uuid' &&
+                                nullable &&
+                                typeof v === 'string' &&
+                                v.toLowerCase() === 'null'
+                            ) {
+                                return null;
+                            }
+
                             const _v = Parser.string(v, nullable);
                             if (_v === null) {
                                 return null;

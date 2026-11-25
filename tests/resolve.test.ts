@@ -38,11 +38,6 @@ describe('resolveExpression', () => {
 
             expect(result).toStrictEqual(err('undefined'));
         });
-        test('Value: undefined', () => {
-            const result = resolveExpression(U.value(undefined), 1, false);
-
-            expect(result).toStrictEqual(err('wrapped value -> undefined'));
-        });
         test('IsNull, IsNotNull, IsTrue, IsFalse, Not', () => {
             const result = resolveExpression(
                 U.compare(undefined, '= true'),
@@ -318,11 +313,7 @@ describe('resolveExpression', () => {
                 ok({ text: '$2::JSONB', params: [JSON.stringify({ a: 1 })] })
             );
         });
-        test('Value', () => {
-            const result = resolveExpression(U.value(1), 2, randomBoolean);
 
-            expect(result).toStrictEqual(ok({ text: '$2', params: ['1'] }));
-        });
         describe('IsNull, IsNotNull, IsTrue, IsFalse, Not', () => {
             test('IsNull', () => {
                 const result = resolveExpression(
@@ -1096,11 +1087,6 @@ describe('resolveExpression', () => {
 
             expect(result).toStrictEqual(ok({ text: '', params: [] }));
         });
-        test('Value: undefined', () => {
-            const result = resolveExpression(U.value(undefined), 1, true);
-
-            expect(result).toStrictEqual(ok({ text: '', params: [] }));
-        });
         test('IsNull, IsNotNull, IsTrue, IsFalse, Not', () => {
             const result = resolveExpression(
                 U.compare(undefined, '= true'),
@@ -1396,6 +1382,138 @@ describe('resolveResult', () => {
 
             expect(result).toStrictEqual(ok([{ a: 1 }, { b: 2 }]));
         });
+    });
+});
+
+describe('regressions', () => {
+    const PostTable = createTable({
+        schemaName: 'public',
+        tableName: 'post',
+        columns: {
+            id: { type: 'int4', nullable: false, default: false },
+            title: { type: 'text', nullable: false, default: false },
+            tags: { type: 'jsonb', nullable: false, default: false }
+        }
+    });
+    const Post = createEntity(PostTable);
+
+    test('in sub-query keeps the params of the first operand', () => {
+        const result = resolveExpression(
+            U.compare(
+                'a',
+                'in sub-query',
+                Post.select(['title'], context =>
+                    context.compare('id', '=', 1)
+                ) as Query<Schema, never>
+            ),
+            1
+        );
+
+        expect(result).toStrictEqual(
+            ok(
+                partialQuery(
+                    '$1 IN (SELECT "title" FROM "public"."post" WHERE "id" = 1)',
+                    ['a']
+                )
+            )
+        );
+    });
+    test('not in sub-query numbers params after the first operand', () => {
+        const result = resolveExpression(
+            U.compare(
+                'a',
+                'not in sub-query',
+                Post.select(['title'], context =>
+                    context.compare('title', '=', 'b')
+                ) as Query<Schema, never>
+            ),
+            1
+        );
+
+        expect(result).toStrictEqual(
+            ok(
+                partialQuery(
+                    '$1 NOT IN (SELECT "title" FROM "public"."post" WHERE "title" = $2)',
+                    ['a', 'b']
+                )
+            )
+        );
+    });
+    test('@@ json path match', () => {
+        const result = resolveExpression(
+            U.compare(U.column(PostTable, 'tags'), '@@', '$.a == 1'),
+            1
+        );
+
+        expect(result).toStrictEqual(
+            ok(partialQuery('"public"."post"."tags" @@ $1', ['$.a == 1']))
+        );
+    });
+    test('switchCase drops the params of a skipped case', () => {
+        const result = resolveExpression(
+            U.switchCase(
+                [
+                    {
+                        when: U.compare(U.column(PostTable, 'title'), '=', 'a'),
+                        then: undefined as undefined | string
+                    }
+                ],
+                'b'
+            ),
+            1,
+            true
+        );
+
+        expect(result).toStrictEqual(ok(partialQuery('$1', ['b'])));
+    });
+    test('switchCase keeps the params of later cases in order', () => {
+        const result = resolveExpression(
+            U.switchCase(
+                [
+                    {
+                        when: U.compare(U.column(PostTable, 'title'), '=', 'a'),
+                        then: undefined as undefined | string
+                    },
+                    {
+                        when: U.compare(U.column(PostTable, 'title'), '=', 'c'),
+                        then: 'd'
+                    }
+                ],
+                'b'
+            ),
+            1,
+            true
+        );
+
+        expect(result).toStrictEqual(
+            ok(
+                partialQuery(
+                    'CASE WHEN "public"."post"."title" = $1 THEN $2 ELSE $3 END',
+                    ['c', 'd', 'b']
+                )
+            )
+        );
+    });
+    test('plain JSON arrays are JSONB values, not expressions', () => {
+        expect(resolveExpression([1, 2], 1)).toStrictEqual(
+            ok(partialQuery('$1::JSONB', ['[1,2]']))
+        );
+        expect(resolveExpression([17, '1; DROP TABLE x; --'], 1)).toStrictEqual(
+            ok(partialQuery('$1::JSONB', ['[17,"1; DROP TABLE x; --"]']))
+        );
+        expect(resolveExpression([18, 'TRUE'], 1)).toStrictEqual(
+            ok(partialQuery('$1::JSONB', ['[18,"TRUE"]']))
+        );
+    });
+    test('list operator reports the neutral item instead of throwing', () => {
+        const result = resolveExpression(
+            U.compare(5 as number, 'in', [U.raw<number>('')]),
+            1
+        );
+
+        expect(result).toStrictEqual(
+            err('is inside of -> second operand -> 0 -> neutral')
+        );
     });
 });
 

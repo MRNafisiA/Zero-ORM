@@ -516,6 +516,10 @@ const createUpdateQuery = <S extends Schema>(
         );
     }
     for (const column in table.columns) {
+        // an explicit value in sets wins over the automatic timestamp.
+        if (_set[column] !== undefined) {
+            continue;
+        }
         switch (
             (
                 table.columns[column] as unknown as {
@@ -728,20 +732,25 @@ const createJoinSelectEntity = <
         SMap & Record<JA, JS>,
         AllS & PrefixAliasOnSchema<JS, JA>
     > => {
-        joinTables.push({
-            table: joinTable,
-            on: on as
-                | boolean
-                | ((contexts: SchemaMapContexts<SMap>) => boolean),
-            joinType,
-            alias: joinAlias
-        });
+        // copy, so branching off one join entity never changes its siblings.
+        const nextJoinTables = [
+            ...joinTables,
+            {
+                table: joinTable,
+                on: on as
+                    | boolean
+                    | ((contexts: SchemaMapContexts<SMap>) => boolean),
+                joinType,
+                alias: joinAlias
+            }
+        ];
         return createJoinSelectEntity<
             SMap & Record<JA, JS>,
             AllS & PrefixAliasOnSchema<JS, JA>
         >(
             main,
-            joinTables as (TableWithAlias & JoinData<SMap & Record<JA, JS>>)[],
+            nextJoinTables as (TableWithAlias &
+                JoinData<SMap & Record<JA, JS>>)[],
             {
                 ...contexts,
                 [`${joinAlias}Context`]: createContext(joinTable, joinAlias)
@@ -1087,26 +1096,16 @@ const createQuery = <
     const R extends keyof S | CustomColumn<unknown, string>
 >(
     createQueryData: (params: string[]) => Result<QueryData, string>
-): Query<S, R> => {
-    let queryDataResult: Result<QueryData, string>;
-    return {
-        getData: (params = []) => {
-            if (queryDataResult === undefined) {
-                queryDataResult = createQueryData(params);
-            }
-            if (!queryDataResult.ok) {
-                return queryDataResult;
-            }
-            return queryDataResult;
-        },
+): Query<S, R> =>
+    // not cached: placeholder numbers depend on the params offset, which differs per use (e.g. as a sub-query).
+    ({
+        getData: (params = []) => createQueryData(params),
         execute: async <const M extends Mode>(
             client: ClientBase,
             mode: M,
             params: string[] = []
         ) => {
-            if (queryDataResult === undefined) {
-                queryDataResult = createQueryData(params);
-            }
+            const queryDataResult = createQueryData(params);
             if (!queryDataResult.ok) {
                 return Promise.resolve(queryDataResult);
             }
@@ -1118,8 +1117,7 @@ const createQuery = <
                 .then(({ rows }) => resolveResult<S, R, M>(rows, mode))
                 .catch(e => err(e));
         }
-    };
-};
+    });
 
 export {
     createEntity,
@@ -1161,4 +1159,3 @@ export type {
     QueryResultRow,
     ReturningRow
 };
-

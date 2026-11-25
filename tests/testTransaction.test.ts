@@ -331,3 +331,75 @@ describe('isEqual', () => {
         expect(result).toStrictEqual(true);
     });
 });
+
+describe('regressions', () => {
+    const mockPoolReturning = (rows: Record<string, unknown>[]) => ({
+        connect: jest.fn().mockResolvedValueOnce({
+            query: jest
+                .fn()
+                .mockResolvedValueOnce(undefined) // begin transaction
+                .mockResolvedValueOnce(undefined) // create tables
+                .mockResolvedValueOnce({ rows }) // select
+                .mockResolvedValueOnce(undefined), // commit or rollback
+            release: jest.fn()
+        })
+    });
+
+    test('rollback false still fails on differences', async () => {
+        await expect(
+            testTransaction(
+                [
+                    {
+                        table: UserTable,
+                        startData: [],
+                        finalData: [{ id: 1, username: null }]
+                    }
+                ],
+                async () => undefined,
+                mockPoolReturning([
+                    { id: 2, username: null }
+                ]) as unknown as Pool,
+                'read-committed',
+                false
+            )
+        ).rejects.toContain('final row not found');
+    });
+    test('matcher index points into rows', async () => {
+        const seen: boolean[] = [];
+
+        await testTransaction(
+            [
+                {
+                    table: UserTable,
+                    startData: [],
+                    finalData: [
+                        { id: 1, username: null },
+                        {
+                            id: (
+                                cell: unknown,
+                                rows: Record<string, unknown>[],
+                                index: number
+                            ) => {
+                                seen.push(rows[index].id === cell);
+                                return cell === 2;
+                            },
+                            username: null
+                        }
+                    ]
+                }
+            ],
+            async () => undefined,
+            mockPoolReturning([
+                { id: 1, username: null },
+                { id: 2, username: null }
+            ]) as unknown as Pool
+        );
+
+        expect(seen).toStrictEqual([true]);
+    });
+    test('isEqual compares dates by value', () => {
+        expect(isEqual(new Date(0), new Date(0))).toStrictEqual(true);
+        expect(isEqual(new Date(0), new Date(1))).toStrictEqual(false);
+        expect(isEqual(new Date(0), {})).toStrictEqual(false);
+    });
+});

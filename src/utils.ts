@@ -9,6 +9,7 @@ import {
     ListOperator,
     NullOperator,
     OperatorCode,
+    tagExpression,
     BetweenOperator,
     BooleanOperator,
     CompareOperator,
@@ -16,9 +17,6 @@ import {
     JsonCompareOperator,
     ListWithSubQueryOperator
 } from './keywords';
-
-const value = <T>(expression: T): T =>
-    [OperatorCode.Value, expression] as unknown as T;
 
 function arithmetic<const T extends undefined | null | number>(
     expressionA: T,
@@ -51,9 +49,11 @@ function arithmetic<const T extends undefined | null | Decimal>(
     _?: never
 ): Extract<T, undefined | null> | (T extends Decimal ? Decimal : never);
 function arithmetic(a: unknown, b: unknown, c: unknown) {
-    return Array.isArray(b)
-        ? [OperatorMap[a as ArithmeticOperator], b]
-        : [OperatorMap[b as ArithmeticOperator], [a, c]];
+    return tagExpression(
+        Array.isArray(b)
+            ? [OperatorMap[a as ArithmeticOperator], b]
+            : [OperatorMap[b as ArithmeticOperator], [a, c]]
+    );
 }
 
 function json<
@@ -124,7 +124,7 @@ function json(
     b: unknown,
     c: unknown
 ): unknown {
-    return [OperatorMap[operator], a, b, c];
+    return tagExpression([OperatorMap[operator], a, b, c]);
 }
 
 // use "as" for casting, generic approach is not possible due to undefined arguments
@@ -132,13 +132,13 @@ const fun = (
     name: string,
     args: readonly unknown[],
     cast: string = ''
-): unknown => [OperatorCode.Function, name, args, cast];
+): unknown => tagExpression([OperatorCode.Function, name, args, cast]);
 
 const cons = (
     name: string,
     args: readonly unknown[],
     cast: string = ''
-): unknown => [OperatorCode.Constructor, name, args, cast];
+): unknown => tagExpression([OperatorCode.Constructor, name, args, cast]);
 
 const switchCase = <const W extends undefined | boolean, const T>(
     cases: {
@@ -147,7 +147,11 @@ const switchCase = <const W extends undefined | boolean, const T>(
     }[],
     otherwise?: T
 ): undefined extends W ? undefined | T : T =>
-    [OperatorCode.SwitchCase, cases, otherwise] as unknown as T;
+    tagExpression([
+        OperatorCode.SwitchCase,
+        cases.map(({ when, then }) => Object.freeze({ when, then })),
+        otherwise
+    ]) as unknown as T;
 
 function concat<const T extends undefined | null | string>(
     ...expressions: T[]
@@ -156,7 +160,7 @@ function concat<const T extends undefined | null | Json>(
     ...expressions: T[]
 ): Extract<T, undefined | null> | (T extends Json ? Json : never);
 function concat(...a: unknown[]) {
-    return [OperatorCode.Concat, a];
+    return tagExpression([OperatorCode.Concat, a]);
 }
 
 const column = <S extends Schema, K extends keyof S & string>(
@@ -164,10 +168,11 @@ const column = <S extends Schema, K extends keyof S & string>(
     column: K,
     full?: boolean,
     alias?: string
-): NullableType<S[K]['narrowType'], S[K]['nullable']> => [
-    OperatorCode.Column,
-    resolveColumn(table, column, full, alias)
-];
+): NullableType<S[K]['narrowType'], S[K]['nullable']> =>
+    tagExpression([
+        OperatorCode.Column,
+        resolveColumn(table, column, full, alias)
+    ]) as NullableType<S[K]['narrowType'], S[K]['nullable']>;
 
 const raw = <const T>(
     textOrGet:
@@ -176,24 +181,27 @@ const raw = <const T>(
               expression: string;
               params: string[];
           })
-): T => [OperatorCode.Raw, textOrGet] as unknown as T;
+): T => tagExpression([OperatorCode.Raw, textOrGet]) as unknown as T;
 
 const ignore = <const T>(
     expression: T,
     otherwise: Exclude<T, undefined>
 ): Exclude<T, undefined> =>
-    [OperatorCode.Ignore, expression, otherwise] as Exclude<T, undefined>;
+    tagExpression([OperatorCode.Ignore, expression, otherwise]) as Exclude<
+        T,
+        undefined
+    >;
 
 const not = <const T extends undefined | null | boolean>(expression: T): T =>
-    [OperatorCode.Not, expression] as unknown as T;
+    tagExpression([OperatorCode.Not, expression]) as unknown as T;
 
 const and = <const T extends undefined | null | boolean>(
     ...expressions: T[]
-): T => [OperatorCode.And, expressions] as unknown as T;
+): T => tagExpression([OperatorCode.And, expressions]) as unknown as T;
 
 const or = <const T extends undefined | null | boolean>(
     ...expressions: T[]
-): T => [OperatorCode.Or, expressions] as unknown as T;
+): T => tagExpression([OperatorCode.Or, expressions]) as unknown as T;
 
 function compare<const T>(
     expression: T,
@@ -369,38 +377,45 @@ function compare(
     b: unknown,
     c: unknown
 ): unknown {
-    return [OperatorMap[operator], a, b, c];
+    return tagExpression([OperatorMap[operator], a, b, c]);
 }
 
 const subQuery = <T>(query: Query<Schema, never>): T =>
-    [OperatorCode.SubQuery, query] as T;
+    tagExpression([OperatorCode.SubQuery, query]) as T;
 
 const subQueryExist = (query: Query<Schema, never>): boolean =>
-    [OperatorCode.SubQueryExist, query] as unknown as boolean;
+    tagExpression([OperatorCode.SubQueryExist, query]) as unknown as boolean;
+
+// SQL string literal; doubling single quotes is enough with standard_conforming_strings (the default since PG 9.1).
+const quote = (text: string) => `'${text.replace(/'/g, "''")}'`;
 
 const stringify = (value: unknown, inline = false): string => {
     switch (typeof value) {
         case 'boolean':
             return value ? 'TRUE' : 'FALSE';
         case 'number':
+            // NaN, Infinity and -Infinity are only valid in SQL as quoted literals.
+            return inline && !Number.isFinite(value)
+                ? quote(`${value}`)
+                : `${value}`;
         case 'bigint':
             return `${value}`;
         case 'string':
-            return inline ? `'${value}'` : `${value}`;
+            return inline ? quote(value) : value;
         case 'object':
             if (value === null) {
                 return 'NULL';
             }
             if (Decimal.isDecimal(value)) {
-                return inline ? `'${value}'` : `${value}`;
+                return inline ? quote(`${value}`) : `${value}`;
             }
             if (value instanceof Date) {
                 return inline
-                    ? `'${value.toISOString()}'`
+                    ? quote(value.toISOString())
                     : value.toISOString();
             }
             return inline
-                ? `'${JSON.stringify(value)}'::JSONB`
+                ? `${quote(JSON.stringify(value))}::JSONB`
                 : JSON.stringify(value);
         case 'undefined':
         case 'function':
@@ -410,7 +425,6 @@ const stringify = (value: unknown, inline = false): string => {
 };
 
 export {
-    value,
     arithmetic,
     json,
     fun,
